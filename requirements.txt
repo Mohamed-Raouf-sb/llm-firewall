@@ -1,0 +1,10 @@
+# Full environment for API, training, and evaluation. For the lightweight API
+# without downloading the ML stack, use requirements-api.txt instead.
+-r requirements-api.txt
+transformers>=4.40,<5
+datasets>=2.18,<4
+evaluate>=0.4,<1
+scikit-learn>=1.4,<2
+pandas>=2.1,<3
+torch>=2.2
+accelerate>=1.1.0

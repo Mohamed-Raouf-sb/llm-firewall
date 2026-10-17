@@ -1,0 +1,5 @@
+# Small runtime dependencies for rule-based inspection and proxy mode.
+fastapi>=0.110,<1
+uvicorn>=0.27,<1
+pydantic-settings>=2.2,<3
+httpx>=0.27,<1

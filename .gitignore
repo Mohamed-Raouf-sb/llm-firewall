@@ -1,0 +1,11 @@
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.env
+data/raw/*
+!data/raw/benign_hard_negatives.csv
+data/processed/
+artifacts/
+outputs/
+.pytest_cache/
