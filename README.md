@@ -29,6 +29,36 @@ UPSTREAM_API_KEY=your-key \
 
 Point an OpenAI-compatible client at `http://127.0.0.1:8000/v1` and use `/chat/completions` as usual. Keep the provider key in an environment variable; do not commit it to the project. For local inspection without an upstream, call `/v1/inspect` or `/v1/chat/completions` as described below. The firewall currently inspects text from `user` role messages; it does not inspect image pixels or tool-role messages.
 
+## Deploy the transformer interface on Render
+
+The model checkpoint is not committed to this GitHub repository. Upload the local model directory to a Hugging Face model repository first. From the project root, install the Hub CLI in your virtual environment and authenticate with a Hugging Face write token:
+
+```bash
+.venv/bin/python -m pip install huggingface_hub
+.venv/bin/hf auth login
+.venv/bin/hf upload r4ouf-sb44/prompt-firewall-mohamed-fix artifacts/prompt-firewall-mohamed-fix . --repo-type model
+```
+
+Create the Hugging Face model repository before uploading. A private repository is recommended. Do not put the Hugging Face token in this repository.
+
+In Render, create or open the project's **Web Service** and set:
+
+- **Build command:** `pip install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.2,<3' && pip install -r requirements-inference.txt`
+- **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- **Python version:** `3.11` (also specified in `.python-version`)
+- **Instance plan:** choose one with at least 2 GB RAM for the transformer model. Render's 512 MB Free plan is too small for reliable model inference.
+
+Add these environment variables under **Environment**:
+
+| Key | Value |
+|---|---|
+| `MODEL_PATH` | `r4ouf-sb44/prompt-firewall-mohamed-fix` |
+| `BLOCK_THRESHOLD` | `0.99228` |
+| `REVIEW_THRESHOLD` | `0.75` |
+| `HF_TOKEN` | A Hugging Face **read** token, only if the model repository is private |
+
+Keep `HF_TOKEN` marked secret in Render. For a public model repository, omit it. Save the changes and redeploy. After the first deploy downloads the checkpoint, open the service URL (the root page, not `/docs`); the interface should report `transformer` as the detector. Confirm this at `https://YOUR-SERVICE.onrender.com/health`, whose `detector` field should be `transformer`.
+
 Example inspection request:
 
 ```bash
@@ -99,7 +129,7 @@ The model calculates a new malicious score for every prompt. `BLOCK_THRESHOLD` a
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MODEL_PATH` | unset | Local Hugging Face model directory |
+| `MODEL_PATH` | unset | Local model directory or Hugging Face model repository ID |
 | `BLOCK_THRESHOLD` | `0.99228` | Malicious probability at/above which prompts are blocked for the recommended model |
 | `REVIEW_THRESHOLD` | `0.75` | Malicious probability at/above which prompts receive `review` instead of `allow` |
 | `FAIL_OPEN` | `false` | Continue with rules if configured model fails to load |

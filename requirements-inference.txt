@@ -1,0 +1,5 @@
+# Dependencies for serving the trained classifier. Install the CPU-only PyTorch
+# wheel separately in Render's build command (see README.md).
+-r requirements-api.txt
+transformers>=5.0,<6
+torch>=2.2,<3
