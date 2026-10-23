@@ -13,23 +13,25 @@ python -m uvicorn app.main:app --reload
 
 If your shell has multiple Python installations, use the virtual environment's interpreter explicitly: `.venv/bin/python -m pip install -r requirements-api.txt` followed by `.venv/bin/python -m uvicorn app.main:app --reload`. This avoids accidentally running a global `uvicorn` launcher from a different Python installation.
 
-Open `http://127.0.0.1:8000/` for the prompt testing interface, or `http://127.0.0.1:8000/docs` for the API. The interface shows the predicted class, malicious and safe scores, firewall decision, detector type, and latency. With no model configured, the service starts in **rules mode**; the page shows a notice because this baseline is for API development only. To run the trained detector, start the API with the recommended model command below. `/v1/chat/completions` can optionally forward allowed prompts to an OpenAI-compatible endpoint when `UPSTREAM_BASE_URL` and `UPSTREAM_API_KEY` are configured. Without upstream configuration it returns an inspection-only result.
+Open `http://127.0.0.1:8000/` for the prompt inspector, `http://127.0.0.1:8000/chat` for the firewall-protected chatbot, or `http://127.0.0.1:8000/docs` for the API. The inspector shows detector decisions and scores. The chatbot sends messages through the firewall before forwarding allowed requests to an OpenAI-compatible LLM. Its API key remains server-side. With no model configured, the detector uses **rules mode**; with no upstream LLM configured, chat is disabled.
 
 ## Connect an upstream LLM
 
-Set the upstream base URL to the provider's API base (for example, `https://api.openai.com/v1`) and provide its key in the environment. The firewall scans text in user messages, returns `403` for blocked or review-required prompts, and forwards allowed messages. It preserves additional compatible request fields such as `tools`, `response_format`, and `stream`; streamed responses are relayed as they arrive. Upstream errors and HTTP status codes are returned to the caller, while connection failures return `502` and timeouts return `504`.
+Set the upstream base URL to the provider's API base (for example, `https://api.openai.com/v1`), the model name, and its key in the server environment. The firewall scans user messages, returns `403` for blocked or review-required prompts, and forwards allowed requests. It replaces client-supplied system/developer messages with a trusted security system prompt before forwarding. This prompt adds defense in depth; it does not replace the detector. Upstream errors and HTTP status codes are returned to the caller, while connection failures return `502` and timeouts return `504`.
+
+Copy `.env.example` to `.env`, enter your provider key in `UPSTREAM_API_KEY`, and start the API. The settings loader reads `.env` automatically:
 
 ```bash
-MODEL_PATH=artifacts/prompt-firewall-mohamed-fix \
-BLOCK_THRESHOLD=0.99228 \
-UPSTREAM_BASE_URL=https://api.openai.com/v1 \
-UPSTREAM_API_KEY=your-key \
+cp .env.example .env
+# Edit .env and add your private API key, then run:
 .venv/bin/python -m uvicorn app.main:app --reload
 ```
 
-Point an OpenAI-compatible client at `http://127.0.0.1:8000/v1` and use `/chat/completions` as usual. Keep the provider key in an environment variable; do not commit it to the project. For local inspection without an upstream, call `/v1/inspect` or `/v1/chat/completions` as described below. The firewall currently inspects text from `user` role messages; it does not inspect image pixels or tool-role messages.
+`.env` is excluded by `.gitignore`; `.env.example` contains no secrets and is safe to commit. On Render, set the same values in the service's Environment settings instead of uploading a `.env` file.
 
-## Deploy the transformer interface on Render
+Point an OpenAI-compatible client at `http://127.0.0.1:8000/v1` and use `/chat/completions` as usual. Keep the provider key in an environment variable; do not commit it to the project. The web chatbot is at `/chat` and sends its conversation through the same firewall endpoint.
+
+## Deploy the app on Render
 
 The model checkpoint is not committed to this GitHub repository. Upload the local model directory to a Hugging Face model repository first. From the project root, install the Hub CLI in your virtual environment and authenticate with a Hugging Face write token:
 
@@ -41,12 +43,9 @@ The model checkpoint is not committed to this GitHub repository. Upload the loca
 
 Create the Hugging Face model repository before uploading. A private repository is recommended. Do not put the Hugging Face token in this repository.
 
-In Render, create or open the project's **Web Service** and set:
+The repository uses a Dockerfile, so Render will build from that file; there are no separate Build Command or Start Command fields for this Docker service. The Dockerfile installs CPU-only inference dependencies and binds Uvicorn to Render's `PORT`. Push changes to `main` to trigger a rebuild, or select **Manual Deploy → Deploy latest commit**.
 
-- **Build command:** `pip install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.2,<3' && pip install -r requirements-inference.txt`
-- **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-- **Python version:** `3.11` (also specified in `.python-version`)
-- **Instance plan:** choose one with at least 2 GB RAM for the transformer model. Render's 512 MB Free plan is too small for reliable model inference.
+For the transformer checkpoint, choose a Render instance with at least 2 GB RAM. The Free plan has 512 MB and is too small for reliable transformer inference. The rules-only version needs less memory.
 
 Add these environment variables under **Environment**:
 
@@ -56,6 +55,9 @@ Add these environment variables under **Environment**:
 | `BLOCK_THRESHOLD` | `0.99228` |
 | `REVIEW_THRESHOLD` | `0.75` |
 | `HF_TOKEN` | A Hugging Face **read** token, only if the model repository is private |
+| `UPSTREAM_BASE_URL` | `https://api.groq.com/openai/v1` |
+| `UPSTREAM_MODEL` | `openai/gpt-oss-20b` |
+| `UPSTREAM_API_KEY` | Your Groq API key; mark it secret |
 
 Keep `HF_TOKEN` marked secret in Render. For a public model repository, omit it. Save the changes and redeploy. After the first deploy downloads the checkpoint, open the service URL (the root page, not `/docs`); the interface should report `transformer` as the detector. Confirm this at `https://YOUR-SERVICE.onrender.com/health`, whose `detector` field should be `transformer`.
 
@@ -123,19 +125,20 @@ The test results show both remaining misses (58 malicious examples) and false al
 
 ### How thresholds work
 
-The model calculates a new malicious score for every prompt. `BLOCK_THRESHOLD` and `REVIEW_THRESHOLD` are fixed policy cutoffs for the running server; the score changes per prompt, while the cutoff stays fixed so decisions remain reproducible. The default blocking threshold is calibrated for the recommended model using its validation split. If you use a different model, select a new cutoff on validation data and set `BLOCK_THRESHOLD` before serving it; thresholds do not transfer reliably between model checkpoints. Lower cutoffs block more prompts, including more benign ones.
+The model calculates a new malicious score for every prompt. `BLOCK_THRESHOLD` and `REVIEW_THRESHOLD` are fixed policy cutoffs for the running server; the score changes per prompt, while the cutoff stays fixed so decisions remain reproducible. The default `0.90` is set so the rules fallback's `0.92` injection score is blocked. For the recommended transformer checkpoint, the validation-selected cutoff is `0.99228`; set that explicitly when deploying that model. Thresholds do not transfer reliably between detector types or checkpoints. Lower cutoffs block more prompts, including more benign ones.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `MODEL_PATH` | unset | Local model directory or Hugging Face model repository ID |
-| `BLOCK_THRESHOLD` | `0.99228` | Malicious probability at/above which prompts are blocked for the recommended model |
+| `BLOCK_THRESHOLD` | `0.90` | Malicious probability at/above which prompts are blocked; validate this cutoff for your detector |
 | `REVIEW_THRESHOLD` | `0.75` | Malicious probability at/above which prompts receive `review` instead of `allow` |
 | `FAIL_OPEN` | `false` | Continue with rules if configured model fails to load |
 | `MAX_PROMPT_CHARS` | `20000` | Input size limit |
 | `UPSTREAM_BASE_URL` | unset | OpenAI-compatible API base URL, e.g. `https://api.openai.com/v1` |
-| `UPSTREAM_API_KEY` | unset | Upstream bearer token |
+| `UPSTREAM_MODEL` | `gpt-4o-mini` | Model identifier sent to the upstream API |
+| `UPSTREAM_API_KEY` | unset | Upstream bearer token; keep it secret and server-side |
 | `UPSTREAM_TIMEOUT_SECONDS` | `30` | Upstream request timeout |
 
 ## API

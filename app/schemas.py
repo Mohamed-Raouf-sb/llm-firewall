@@ -26,6 +26,6 @@ class ChatRequest(BaseModel):
     # stream, tools, top_p, response_format, and tool_choice.
     model_config = ConfigDict(extra="allow")
 
-    model: str
+    model: str = "default"
     messages: list[dict[str, Any]]
 

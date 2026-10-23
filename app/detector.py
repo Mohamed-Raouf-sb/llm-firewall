@@ -1,5 +1,8 @@
 import re
 import time
+import base64
+import binascii
+import codecs
 from dataclasses import dataclass
 
 from app.settings import settings
@@ -11,6 +14,8 @@ PATTERNS = [
     re.compile(r"\b(jailbreak|DAN mode|developer mode|bypass (?:the )?(?:safety|guardrails|filter))\b", re.I),
     re.compile(r"\b(do not follow|don't follow)\b.{0,80}\b(safety|policy|rules|instructions?)\b", re.I | re.S),
 ]
+BASE64_TOKEN = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/])")
+SEVERITY_CUES = re.compile(r"\b(unrestricted|jailbreak|bypass|exfiltrate|credentials?|api keys?|system prompt|hidden instructions?)\b", re.I)
 
 
 @dataclass
@@ -56,6 +61,9 @@ class Detector:
     def predict(self, text: str) -> Prediction:
         started = time.perf_counter()
         probability = self._model_score(text) if self.model is not None else self._rule_score(text)
+        # Inspect common text encodings too; attackers may hide overrides from
+        # text-only classification with Base64 or ROT13.
+        probability = max(probability, self._encoded_injection_score(text), self._rot13_injection_score(text))
         predicted_class = "malicious" if probability >= 0.5 else "safe"
         return Prediction(
             malicious_probability=probability,
@@ -77,7 +85,31 @@ class Detector:
     @staticmethod
     def _rule_score(text: str) -> float:
         hits = sum(bool(pattern.search(text)) for pattern in PATTERNS)
-        return 0.92 if hits >= 2 else (0.78 if hits == 1 else 0.01)
+        if not hits:
+            return 0.01
+        cue_hits = len(SEVERITY_CUES.findall(text))
+        length_bonus = min(len(text) // 160, 3) * 0.005
+        return min(0.99, 0.70 + 0.10 * hits + 0.015 * min(cue_hits, 5) + length_bonus)
+
+    @staticmethod
+    def _encoded_injection_score(text: str) -> float:
+        for match in BASE64_TOKEN.finditer(text):
+            token = match.group(0)
+            token += "=" * (-len(token) % 4)
+            try:
+                decoded = base64.b64decode(token, validate=True).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                continue
+            decoded_score = Detector._rule_score(decoded)
+            if decoded_score >= 0.70:
+                return min(0.999, 0.90 + 0.3 * (decoded_score - 0.70))
+        return 0.01
+
+    @staticmethod
+    def _rot13_injection_score(text: str) -> float:
+        decoded = codecs.decode(text, "rot_13")
+        decoded_score = Detector._rule_score(decoded)
+        return min(0.999, 0.90 + 0.3 * (decoded_score - 0.70)) if decoded_score >= 0.70 else 0.01
 
 
 detector = Detector()

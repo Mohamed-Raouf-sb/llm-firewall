@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1220">
+  <title>AI Firewall · Secure Chat</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1220; --panel:#111b2d; --line:#263750; --text:#edf4ff; --muted:#9aabc3; --accent:#68e0c0; --red:#ff7b86; --amber:#ffd071; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(ellipse at 12% 0%,#172a43 0,transparent 38%),var(--bg); color:var(--text); font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
+    main { width:min(850px,calc(100% - 28px)); margin:0 auto; padding:30px 0; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:15px; margin-bottom:20px; }
+    h1 { margin:0; font-size:21px; } p { margin:4px 0; color:var(--muted); }
+    a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
+    .status,.notice { border:1px solid var(--line); border-radius:11px; background:#111b2d; padding:10px 13px; color:var(--muted); font-size:13px; }
+    .notice { margin-bottom:14px; border-color:#6b5630; background:#2b2417; color:#f2d99f; }
+    .chat { height:min(62vh,650px); min-height:340px; overflow:auto; padding:17px; border:1px solid var(--line); border-radius:16px; background:#0d1727; }
+    .msg { max-width:85%; margin:0 0 13px; padding:11px 14px; border-radius:13px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .user { margin-left:auto; background:#17362f; border:1px solid #3f685f; }
+    .assistant { background:#152238; border:1px solid #30415b; }
+    .system { max-width:100%; background:#2b2417; border:1px solid #6b5630; color:#f2d99f; }
+    form { display:flex; gap:10px; margin-top:12px; padding:12px; border:1px solid var(--line); border-radius:15px; background:var(--panel); }
+    textarea { flex:1; min-height:54px; max-height:180px; resize:vertical; border:0; outline:0; background:transparent; color:var(--text); font:inherit; }
+    button { align-self:flex-end; min-height:42px; padding:0 17px; border:0; border-radius:10px; background:var(--accent); color:#09241e; font-weight:800; cursor:pointer; }
+    button:disabled { opacity:.55; cursor:wait; }
+    footer { display:flex; justify-content:space-between; gap:12px; margin-top:12px; font-size:12px; color:var(--muted); }
+    @media(max-width:560px) { header,footer { align-items:flex-start; flex-direction:column; } .chat { min-height:55vh; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>Firewall protected chat</h1><p>Prompts are inspected before the assistant receives them.</p></div>
+      <a href="/">Open prompt inspector</a>
+    </header>
+    <div class="status" id="status" role="status">Checking firewall and chat configuration…</div>
+    <div class="notice" id="notice" hidden></div>
+    <section class="chat" id="chat" aria-live="polite" aria-label="Chat messages">
+      <div class="msg assistant">Hi! Send a message and the firewall will inspect it before forwarding it to the configured chat model.</div>
+    </section>
+    <form id="form">
+      <textarea id="input" maxlength="20000" placeholder="Write a message…" aria-label="Your message" required></textarea>
+      <button id="send" type="submit" disabled>Send</button>
+    </form>
+    <footer><span>The provider API key stays on the server.</span><span>Firewall decisions can be imperfect; avoid sending secrets.</span></footer>
+  </main>
+  <script>
+    const chat = document.querySelector("#chat");
+    const form = document.querySelector("#form");
+    const input = document.querySelector("#input");
+    const send = document.querySelector("#send");
+    const status = document.querySelector("#status");
+    const notice = document.querySelector("#notice");
+    const history = [];
+
+    function addMessage(role, text) {
+      const item = document.createElement("div");
+      item.className = `msg ${role}`;
+      item.textContent = text;
+      chat.append(item);
+      chat.scrollTop = chat.scrollHeight;
+      return item;
+    }
+
+    async function initialize() {
+      try {
+        const response = await fetch("/health");
+        const health = await response.json();
+        if (!response.ok) throw new Error("Firewall API is unavailable.");
+        status.textContent = `Firewall online · ${health.detector} detector · ${health.chat_model} model`;
+        if (!health.chat_configured) {
+          notice.textContent = "Chat is not configured yet. Set UPSTREAM_BASE_URL and UPSTREAM_API_KEY in the server environment, then restart or redeploy.";
+          notice.hidden = false;
+        } else {
+          send.disabled = false;
+        }
+      } catch (error) {
+        status.textContent = "Could not connect to the firewall.";
+        notice.textContent = error.message;
+        notice.hidden = false;
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const content = input.value.trim();
+      if (!content || send.disabled) return;
+      addMessage("user", content);
+      input.value = "";
+      send.disabled = true;
+      send.textContent = "…";
+      const pending = addMessage("assistant", "Checking prompt with firewall…");
+      try {
+        const response = await fetch("/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: [...history, { role: "user", content }] }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          const detail = typeof data.detail === "object" ? data.detail : {};
+          let reason;
+          if (detail.error === "review_required") {
+            reason = `REVIEW REQUIRED — this message was held for review and was not sent to the chatbot. Malicious score: ${formatScore(detail.malicious_probability)}. Please rephrase it if you believe this is a false alarm.`;
+          } else if (detail.error === "prompt_blocked") {
+            reason = `BLOCKED — the firewall rejected this message and did not send it to the chatbot. Malicious score: ${formatScore(detail.malicious_probability)}.`;
+          } else {
+            reason = typeof data.detail === "string" ? data.detail : "The chat request failed.";
+          }
+          pending.className = "msg system";
+          pending.textContent = reason;
+          return;
+        }
+        const answer = data.choices?.[0]?.message?.content;
+        if (typeof answer !== "string") throw new Error("The provider returned no text response.");
+        pending.textContent = answer;
+        history.push({ role: "user", content }, { role: "assistant", content: answer });
+      } catch (error) {
+        pending.className = "msg system";
+        pending.textContent = error.message || "Chat request failed.";
+      } finally {
+        send.disabled = false;
+        send.textContent = "Send";
+        input.focus();
+      }
+    });
+
+    function formatScore(value) {
+      const score = Number(value);
+      return Number.isFinite(score) ? `${(score * 100).toFixed(2)}%` : "unavailable";
+    }
+
+    initialize();
+  </script>
+</body>
+</html>
